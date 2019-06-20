@@ -34,7 +34,7 @@ Losses
 - Additive angular margin loss(Arcface)
 
 Results
-------
+--------
 <table>
     <tr>
         <th rowspan="2">Loss</th>
@@ -132,8 +132,9 @@ Results
         <td>54.3%</td>
     </tr>
 </table>
+
 Repreduction
-------
+--------
 1. Install the framework and create the environment
 https://github.com/KaiyangZhou/deep-person-reid#installation
 2. Prepare the datasets
