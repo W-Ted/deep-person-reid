@@ -133,7 +133,7 @@ Results
     </tr>
 </table>
 
-Repreduction
+Reproduction
 --------
 1. Install the framework and create the environment
 https://github.com/KaiyangZhou/deep-person-reid#installation
