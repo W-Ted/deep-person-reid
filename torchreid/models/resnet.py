@@ -1,13 +1,17 @@
 from __future__ import absolute_import
 from __future__ import division
 
-__all__ = ['resnet18', 'resnet34', 'resnet50', 'resnet101', 'resnet152', 'resnet50_fc512']
+__all__ = ['resnet18', 'resnet34', 'resnet50', 'resnet101', 'resnet152', 'resnet50_fc512', 'resnet50_angularlinear', 'resnet50_fc512_angular', 'resnet50_arcface', 'resnet50_cosface']
 
 import torch
 from torch import nn
 from torch.nn import functional as F
 import torchvision
 import torch.utils.model_zoo as model_zoo
+
+from torch.autograd import Variable
+from torch.nn import Parameter
+import math
 
 
 model_urls = {
@@ -18,6 +22,138 @@ model_urls = {
     'resnet152': 'https://download.pytorch.org/models/resnet152-b121ed2d.pth',
 }
 
+
+def l2_norm(input,axis=1):
+	norm = torch.norm(input,2,axis,True)
+	output = torch.div(input, norm)
+	return output
+
+def myphi(x,m):
+    x = x * m
+    return 1-x**2/math.factorial(2)+x**4/math.factorial(4)-x**6/math.factorial(6) + \
+            x**8/math.factorial(8) - x**9/math.factorial(9)
+
+
+class AngleLinear(nn.Module):
+    def __init__(self, in_features, out_features, m = 4, phiflag=True):
+        super(AngleLinear, self).__init__()
+        self.in_features = in_features
+        self.out_features = out_features
+        self.weight = Parameter(torch.Tensor(in_features, out_features))
+        self.weight.data.uniform_(-1, 1).renorm_(2,1,1e-5).mul_(1e5)
+        self.phiflag = phiflag
+        self.m = m
+        self.mlambda = [
+            lambda x: x**0,
+            lambda x: x**1,
+            lambda x: 2*x**2-1,
+            lambda x: 4*x**3-3*x,
+            lambda x: 8*x**4-8*x**2+1,
+            lambda x: 16*x**5-20*x**3+5*x
+        ]
+
+    def forward(self, input):
+        x = input   # size=(B,F)    F is feature len
+        w = self.weight # size=(F,Classnum) F=in_features Classnum=out_features
+
+        ww = w.renorm(2,1,1e-5).mul(1e5)
+        xlen = x.pow(2).sum(1).pow(0.5) # size=B
+        wlen = ww.pow(2).sum(0).pow(0.5) # size=Classnum
+
+        cos_theta = x.mm(ww) # size=(B,Classnum)
+        cos_theta = cos_theta / xlen.view(-1,1) / wlen.view(1,-1)
+        cos_theta = cos_theta.clamp(-1,1)
+
+        if self.phiflag:
+            cos_m_theta = self.mlambda[self.m](cos_theta)
+            theta = Variable(cos_theta.data.acos())
+            k = (self.m*theta/3.14159265).floor()
+            n_one = k*0.0 - 1
+            phi_theta = (n_one**k) * cos_m_theta - 2*k
+        else:
+            theta = cos_theta.acos()
+            phi_theta = myphi(theta,self.m)
+            phi_theta = phi_theta.clamp(-1*self.m,1)
+
+        cos_theta = cos_theta * xlen.view(-1,1)
+        phi_theta = phi_theta * xlen.view(-1,1)
+        output = (cos_theta,phi_theta)
+        return output # size=(B,Classnum,2)
+
+# Arcface head
+class Arcface(nn.Module):
+	# implementation of additive margin softmax loss in https://arxiv.org/abs/1801.05599
+	def __init__(self, embedding_size=2048, classnum=51332, s=64.0, m=0.1):       # default embedding_size=512, s=64, m=0.5
+		super(Arcface, self).__init__()
+		self.classnum = classnum
+		self.kernel = nn.Parameter(torch.Tensor(embedding_size, classnum))
+		# initial kernel
+		self.kernel.data.uniform_(-1, 1).renorm_(2, 1, 1e-5).mul_(1e5)
+		self.m = m  # the margin value, default is 0.5
+		self.s = s  # scalar value default is 64, see normface https://arxiv.org/abs/1704.06369
+		self.cos_m = math.cos(m)
+		self.sin_m = math.sin(m)
+		self.mm = self.sin_m * m  # issue 1
+		self.threshold = math.cos(math.pi - m)
+		# self.ce_loss = nn.CrossEntropyLoss()
+
+	def forward(self, embbedings):
+		# embbedings = l2_norm(embbedings)
+		# weights norm
+		nB = len(embbedings)
+		kernel_norm = l2_norm(self.kernel, axis=0)
+		# cos(theta+m)
+		cos_theta = torch.mm(embbedings, kernel_norm)
+		#         output = torch.mm(embbedings,kernel_norm)
+		cos_theta = cos_theta.clamp(-1, 1)  # for numerical stability
+		cos_theta_2 = torch.pow(cos_theta, 2)
+		sin_theta_2 = 1 - cos_theta_2
+		sin_theta = torch.sqrt(sin_theta_2)
+		cos_theta_m = (cos_theta * self.cos_m - sin_theta * self.sin_m)
+		# this condition controls the theta+m should in range [0, pi]
+		#      0<=theta+m<=pi
+		#     -m<=theta<=pi-m
+		cond_v = cos_theta - self.threshold
+		cond_mask = cond_v <= 0
+		keep_val = (cos_theta - self.mm)  # when theta not in [0,pi], use cosface instead
+		cos_theta_m[cond_mask] = keep_val[cond_mask]
+		# output = cos_theta * 1.0  # a little bit hacky way to prevent in_place operation on cos_theta
+		# idx_ = torch.arange(0, nB, dtype=torch.long)
+		# output[idx_, label] = cos_theta_m[idx_, label]
+		# output *= self.s  # scale up in order to make softmax work, first introduced in normface
+		return cos_theta, cos_theta_m
+		# return self.ce_loss(output, label)
+
+# Cosface head
+class Am_softmax(nn.Module):
+	# implementation of additive margin softmax loss in https://arxiv.org/abs/1801.05599
+	def __init__(self, embedding_size=2048, classnum=51332):         # default embedding_size=512
+		super(Am_softmax, self).__init__()
+		self.classnum = classnum
+		self.kernel = Parameter(torch.Tensor(embedding_size, classnum))
+		# initial kernel
+		self.kernel.data.uniform_(-1, 1).renorm_(2, 1, 1e-5).mul_(1e5)
+		self.m = 0.0  # 0.35 additive margin recommended by the paper  m=0.35
+		self.s = 50.0  # see normface https://arxiv.org/abs/1704.06369  s=30
+		#self.ce_loss = CrossEntropyLoss()
+
+	def forward(self, embbedings):
+		# embbedings = l2_norm(embbedings)
+		kernel_norm = l2_norm(self.kernel, axis=0)
+		cos_theta = torch.mm(embbedings, kernel_norm)
+		cos_theta = cos_theta.clamp(-1, 1)  # for numerical stability
+		phi = cos_theta - self.m
+		# labell = label             # size=[B]
+		# label = label.view(-1, 1)  # size=(B,1)
+		# index = cos_theta.data * 0.0  # size=(B,Classnum)
+		# index.scatter_(1, label.data.view(-1, 1), 1)
+		# index = index.byte()
+		# output = cos_theta * 1.0
+		# output[index] = phi[index]  # only change the correct predicted output
+		# output *= self.s  # scale up in order to make softmax work, first introduced in normface
+		return cos_theta, phi
+		# print(output.shape, label.shape, labell.shape)
+		# return self.ce_loss(output, labell)
 
 def conv3x3(in_planes, out_planes, stride=1):
     """3x3 convolution with padding"""
@@ -114,6 +250,9 @@ class ResNet(nn.Module):
     def __init__(self, num_classes, loss, block, layers,
                  last_stride=2,
                  fc_dims=None,
+                 angular_linear=None,
+                 arc_face=None,
+                 cos_face=None,
                  dropout_p=None,
                  **kwargs):
         self.inplanes = 64
@@ -133,7 +272,18 @@ class ResNet(nn.Module):
         
         self.global_avgpool = nn.AdaptiveAvgPool2d(1)
         self.fc = self._construct_fc_layer(fc_dims, 512 * block.expansion, dropout_p)
-        self.classifier = nn.Linear(self.feature_dim, num_classes)
+
+        if angular_linear:
+            self.classifier = AngleLinear(self.feature_dim, num_classes)
+        elif arc_face:
+            self.classifier = Arcface(embedding_size=self.feature_dim, classnum=num_classes)
+        elif cos_face:
+            self.classifier = Am_softmax(embedding_size=self.feature_dim, classnum=num_classes)
+        else:
+            self.classifier = nn.Linear(self.feature_dim, num_classes)
+        self.cos_face = cos_face
+        self.arc_face = arc_face
+
 
         self._init_params()
 
@@ -219,13 +369,35 @@ class ResNet(nn.Module):
         
         if not self.training:
             return v
-        
-        y = self.classifier(v)
-        
+
+        if self.cos_face or self.arc_face:
+            y = self.classifier(l2_norm(v))
+        else:
+            y = self.classifier(v)
+            # 如果self.angular = True, 这里返回的是y是[B,Classnum,2]
+
         if self.loss == 'softmax':
             return y
         elif self.loss == 'triplet':
             return y, v
+        elif self.loss == 'a-softmax':
+            return y
+        elif self.loss == 'center':             # resnet50_fc512
+            return y, v
+        elif self.loss == 'n-pair':
+            return v
+        elif self.loss == 'ms':
+            return l2_norm(v)
+        elif self.loss == 'histogram':          # resnet50_fc512
+            return v
+        elif self.loss == 'center+angular':     # resnet50_fc512_angular
+            return y, v
+        elif self.loss == 'focal':
+            return y
+        elif self.loss == 'arcface':
+            return y
+        elif self.loss == 'cosface':
+            return y
         else:
             raise KeyError("Unsupported loss: {}".format(self.loss))
 
@@ -302,6 +474,7 @@ def resnet50(num_classes, loss='softmax', pretrained=True, **kwargs):
     return model
 
 
+
 def resnet101(num_classes, loss='softmax', pretrained=True, **kwargs):
     model = ResNet(
         num_classes=num_classes,
@@ -345,6 +518,71 @@ def resnet50_fc512(num_classes, loss='softmax', pretrained=True, **kwargs):
         layers=[3, 4, 6, 3],
         last_stride=1,
         fc_dims=[512],
+        dropout_p=None,
+        **kwargs
+    )
+    if pretrained:
+        init_pretrained_weights(model, model_urls['resnet50'])
+    return model
+
+
+def resnet50_angularlinear(num_classes, loss='a-softmax', pretrained=True, **kwargs):
+    model = ResNet(
+        num_classes=num_classes,
+        loss=loss,
+        block=Bottleneck,
+        layers=[3, 4, 6, 3],
+        last_stride=2,
+        fc_dims=None,
+        angular_linear=True,
+        dropout_p=None,
+        **kwargs
+    )
+    if pretrained:
+        init_pretrained_weights(model, model_urls['resnet50'])
+    return model
+
+def resnet50_fc512_angular(num_classes, loss='center+angular', pretrained=True, **kwargs):
+    model = ResNet(
+        num_classes=num_classes,
+        loss=loss,
+        block=Bottleneck,
+        layers=[3, 4, 6, 3],
+        last_stride=1,
+        fc_dims=[512],
+        angular_linear=True,
+        dropout_p=None,
+        **kwargs
+    )
+    if pretrained:
+        init_pretrained_weights(model, model_urls['resnet50'])
+    return model
+
+def resnet50_arcface(num_classes, loss='arcface', pretrained=True, **kwargs):
+    model = ResNet(
+        num_classes=num_classes,
+        loss=loss,
+        block=Bottleneck,
+        layers=[3, 4, 6, 3],
+        last_stride=2,
+        fc_dims=None,
+        arc_face=True,
+        dropout_p=None,
+        **kwargs
+    )
+    if pretrained:
+        init_pretrained_weights(model, model_urls['resnet50'])
+    return model
+
+def resnet50_cosface(num_classes, loss='cosface', pretrained=True, **kwargs):
+    model = ResNet(
+        num_classes=num_classes,
+        loss=loss,
+        block=Bottleneck,
+        layers=[3, 4, 6, 3],
+        last_stride=2,
+        fc_dims=None,
+        cos_face=True,
         dropout_p=None,
         **kwargs
     )

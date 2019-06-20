@@ -40,8 +40,7 @@ class CrossEntropyLoss(nn.Module):
         Args:
             inputs (torch.Tensor): prediction matrix (before softmax) with
                 shape (batch_size, num_classes).
-            targets (torch.LongTensor): ground truth labels with shape (batch_size).
-                Each position contains the label index.
+            targets (torch.LongTensor): ground truth labels with shape (num_classes).
         """
         log_probs = self.logsoftmax(inputs)
         targets = torch.zeros(log_probs.size()).scatter_(1, targets.unsqueeze(1).data.cpu(), 1)

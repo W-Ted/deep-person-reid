@@ -95,7 +95,7 @@ class Engine(object):
                 self.train(epoch, trainloader, fixbase=True, open_layers=open_layers,
                            print_freq=print_freq)
             print('Done. From now on all layers are open to train for {} epochs'.format(max_epoch))
-
+        print('start_epoch: ',start_epoch, 'max_epoch: ', max_epoch)
         for epoch in range(start_epoch, max_epoch):
             self.train(epoch, trainloader, print_freq=print_freq)
             
@@ -276,7 +276,7 @@ class Engine(object):
         return cmc[0]
 
     def _compute_loss(self, criterion, outputs, targets):
-        if isinstance(outputs, (tuple, list)):
+        if isinstance(outputs, (list)):     # delete tuple here
             loss = DeepSupervision(criterion, outputs, targets)
         else:
             loss = criterion(outputs, targets)
