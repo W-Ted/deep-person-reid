@@ -142,6 +142,7 @@ class ImageDataManager(DataManager):
 
         self._num_train_pids = trainset.num_train_pids
         self._num_train_cams = trainset.num_train_cams
+        self.batch_size = batch_size
 
         train_sampler = build_train_sampler(
             trainset.train, train_sampler,
