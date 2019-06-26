@@ -1,4 +1,4 @@
-Person re-id based on deep metric learning 
+Person re-identification based on deep metric learning 
 =============
 We compared the performance of deep metric losses commonly used in recent years on person re-identification task. 
 
@@ -145,5 +145,5 @@ https://kaiyangzhou.github.io/deep-person-reid/datasets.html#image-datasets
 To do
 ------
 - [x] add Cosface and Arcface
-- [ ] update README.md
+- [x] update README.md
 - [ ] try more datasets
